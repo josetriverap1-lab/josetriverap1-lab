@@ -1,0 +1,309 @@
+
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Lago Limpio — Con Imágenes</title>
+<style>
+  html,body{height:100%;margin:0;font-family:Inter,Arial,sans-serif;background:#cfeeff}
+  .hud{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:12px 18px}
+  .panel{background:#1f7a2e;color:#fff;padding:10px 14px;border-radius:8px;font-weight:700}
+  #wrap{display:flex;justify-content:center;padding-bottom:28px}
+  canvas{border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.18);touch-action:none}
+  @media (max-width:720px){canvas{width:95vw;height:60vh}}
+</style>
+</head>
+<body>
+  <div class="hud">
+    <div class="panel">Basura restante: <span id="left">0</span></div>
+    <div class="panel">Puntaje: <span id="pts">0</span></div>
+  </div>
+
+  <div id="wrap"><canvas id="c" width="1000" height="640"></canvas></div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// image assets - loaded from same folder
+const ASSETS = {
+  bg: "ec8ad9d5-c722-458d-b071-79ae4d0caa78.png",
+  trash: "73df7822-746a-40d0-b445-d05e0a257e22.png",
+  can: "afe505a4-3d94-4248-a5f1-5c0cdd7d7fd9.png"
+};
+
+let images = {};
+let loaded = 0, totalToLoad = Object.keys(ASSETS).length;
+
+function loadImages(callback){
+  for(const key in ASSETS){
+    const img = new Image();
+    img.src = ASSETS[key];
+    img.onload = () => {
+      images[key] = img;
+      loaded++;
+      if(loaded === totalToLoad) callback();
+    };
+    img.onerror = () => {
+      console.error('Error loading', ASSETS[key]);
+      loaded++;
+      if(loaded === totalToLoad) callback();
+    };
+  }
+}
+
+// lake area (we will draw background image covering canvas and define lake rect)
+const lakeRect = { x: 60, y: 92, w: 820, h: 420 };
+
+// can position: below the lake in the grass area, centered
+const can = { x: W/2 - 48, y: lakeRect.y + lakeRect.h + 10, w: 96, h: 96 };
+
+// Trash pieces will use the trash image but we will crop and draw different frames to simulate variety
+class Trash {
+  constructor(x,y,size,frame){
+    this.x = x; this.y = y;
+    this.baseY = y;
+    this.size = size;
+    this.frame = frame;
+    this.phase = Math.random()*Math.PI*2;
+    this.speed = 0.8 + Math.random()*0.8;
+    this.dragging = false;
+    this.removed = false;
+    this.rot = (Math.random()-0.5)*0.6;
+    this.offset = {x:0,y:0};
+  }
+  update(dt){
+    if(!this.dragging && !this.removed){
+      this.phase += dt * 2 * this.speed;
+      this.y = this.baseY + Math.sin(this.phase) * 6;
+      this.rot += Math.sin(this.phase)*0.001;
+    }
+  }
+  draw(ctx){
+    if(this.removed) return;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.rot);
+    const s = this.size;
+    ctx.drawImage(images.trash, -s/2, -s/2, s, s);
+    ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-s/2, -s/2, s, s);
+    ctx.restore();
+  }
+  contains(px,py){
+    return Math.hypot(px - this.x, py - this.y) < Math.max(16, this.size*0.6);
+  }
+}
+
+let trashList = [];
+let totalTrash = 16;
+let score = 0;
+
+function spawnTrash(n){
+  trashList = [];
+  for(let i=0;i<n;i++){
+    const margin = 40;
+    const x = Math.floor(Math.random()*(lakeRect.w - margin*2) + lakeRect.x + margin);
+    const y = Math.floor(Math.random()*(lakeRect.h - margin*2) + lakeRect.y + margin);
+    const s = 28 + Math.floor(Math.random()*36);
+    trashList.push(new Trash(x,y,s,i));
+  }
+  totalTrash = n;
+  document.getElementById('left').textContent = n;
+  document.getElementById('pts').textContent = 0;
+}
+
+// particles
+let particles = [];
+function createParticles(x,y,color){
+  for(let i=0;i<16;i++){
+    particles.push({x,y,vx:(Math.random()-0.5)*3, vy:(-1.5 - Math.random()*2), life:0.6 + Math.random()*0.8, size:2+Math.random()*3, color});
+  }
+}
+
+// audio - simple WebAudio tones (no external files)
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let audioStarted = false;
+function ensureAudio(){
+  if(audioStarted) return;
+  audioCtx.resume().then(()=>{ audioStarted = true;});
+}
+function playPickup(){
+  if(!audioStarted) return;
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'triangle';
+  o.frequency.setValueAtTime(720, t);
+  o.frequency.exponentialRampToValueAtTime(440, t+0.12);
+  g.gain.setValueAtTime(0.0001,t);
+  g.gain.exponentialRampToValueAtTime(0.18,t+0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001,t+0.22);
+  o.connect(g); g.connect(audioCtx.destination); o.start(); o.stop(t+0.25);
+}
+function playDrop(){
+  if(!audioStarted) return;
+  const t = audioCtx.currentTime;
+  const b = audioCtx.createBufferSource();
+  const buf = audioCtx.createBuffer(1, 256, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for(let i=0;i<data.length;i++) data[i] = (Math.random()*2-1)*0.4;
+  b.buffer = buf;
+  const f = audioCtx.createBiquadFilter(); f.type='lowpass'; f.frequency.value=900;
+  const g = audioCtx.createGain(); g.gain.value = 0.6;
+  b.connect(f); f.connect(g); g.connect(audioCtx.destination);
+  b.start(); b.stop(t+0.12);
+  const os = audioCtx.createOscillator();
+  const g2 = audioCtx.createGain();
+  os.type='sine'; os.frequency.setValueAtTime(900,t); os.frequency.exponentialRampToValueAtTime(620,t+0.5);
+  g2.gain.setValueAtTime(0.0001,t); g2.gain.exponentialRampToValueAtTime(0.18,t+0.02); g2.gain.exponentialRampToValueAtTime(0.0001,t+0.6);
+  os.connect(g2); g2.connect(audioCtx.destination); os.start(); os.stop(t+0.6);
+}
+
+// pointer/touch handling
+let pointerMap = {};
+canvas.addEventListener('mousedown', onPointerDown);
+window.addEventListener('mousemove', onPointerMove);
+window.addEventListener('mouseup', onPointerUp);
+canvas.addEventListener('touchstart', onPointerDown, {passive:false});
+canvas.addEventListener('touchmove', onPointerMove, {passive:false});
+window.addEventListener('touchend', onPointerUp, {passive:false});
+
+function toCanvasCoords(clientX, clientY){
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width/rect.width;
+  const scaleY = canvas.height/rect.height;
+  return { x: (clientX - rect.left)*scaleX, y: (clientY - rect.top)*scaleY };
+}
+
+function onPointerDown(e){
+  ensureAudio();
+  const list = e.changedTouches ? Array.from(e.changedTouches) : [e];
+  const rect = canvas.getBoundingClientRect();
+  list.forEach(ptr => {
+    const id = ptr.identifier !== undefined ? ptr.identifier : 'mouse';
+    const pos = toCanvasCoords(ptr.clientX !== undefined ? ptr.clientX : ptr.clientX, ptr.clientY !== undefined ? ptr.clientY : ptr.clientY);
+    // find topmost trash hit
+    for(let i=trashList.length-1;i>=0;i--){ const t=trashList[i]; if(t.removed) continue; if(t.contains(pos.x,pos.y)){ t.dragging=true; t.offset.x = pos.x - t.x; t.offset.y = pos.y - t.y; pointerMap[id]=t; // bring to top
+          trashList.splice(i,1); trashList.push(t); playPickup(); break; } }
+  });
+  e.preventDefault();
+}
+
+function onPointerMove(e){
+  const list = e.changedTouches ? Array.from(e.changedTouches) : [e];
+  const rect = canvas.getBoundingClientRect();
+  list.forEach(ptr => {
+    const id = ptr.identifier !== undefined ? ptr.identifier : 'mouse';
+    const pos = toCanvasCoords(ptr.clientX !== undefined ? ptr.clientX : ptr.clientX, ptr.clientY !== undefined ? ptr.clientY : ptr.clientY);
+    const t = pointerMap[id];
+    if(t && t.dragging){ t.x = pos.x - t.offset.x; t.y = pos.y - t.offset.y; t.baseY = t.y; }
+  });
+  e.preventDefault();
+}
+
+function onPointerUp(e){
+  const list = e.changedTouches ? Array.from(e.changedTouches) : [e];
+  const rect = canvas.getBoundingClientRect();
+  list.forEach(ptr => {
+    const id = ptr.identifier !== undefined ? ptr.identifier : 'mouse';
+    const pos = toCanvasCoords(ptr.clientX !== undefined ? ptr.clientX : ptr.clientX, ptr.clientY !== undefined ? ptr.clientY : ptr.clientY);
+    const t = pointerMap[id];
+    if(t){ t.dragging=false;
+      // check if dropped inside can area
+      if(pos.x >= can.x && pos.x <= can.x + can.w && pos.y >= can.y && pos.y <= can.y + can.h){ t.removed = true; score += Math.max(5, Math.round(40 - t.size)); document.getElementById('pts').textContent = score; createParticles(pos.x,pos.y,'#fff'); playDrop(); }
+      delete pointerMap[id];
+    }
+  });
+  e.preventDefault();
+}
+
+// update/render loop
+let last = performance.now();
+function update(ts){
+  const now = ts || performance.now();
+  const dt = Math.min(0.04, (now - last)/1000);
+  last = now;
+
+  trashList.forEach(t=>t.update(dt));
+  for(let i=particles.length-1;i>=0;i--){ const p = particles[i]; p.life -= dt; if(p.life <= 0) particles.splice(i,1); p.vy += 0.06; p.x += p.vx; p.y += p.vy; }
+
+  // remove flagged
+  if(trashList.some(t=>t.removed)){ trashList = trashList.filter(t=>!t.removed); document.getElementById('left').textContent = trashList.length; }
+
+  render();
+  requestAnimationFrame(update);
+}
+
+function render(){
+  // draw background image covering canvas
+  if(images.bg) ctx.drawImage(images.bg, 0, 0, W, H);
+  else { ctx.fillStyle='#9bd1ff'; ctx.fillRect(0,0,W,H); }
+
+  // draw lake rectangle overlay to guide area (optional)
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(lakeRect.x, lakeRect.y, lakeRect.w, lakeRect.h);
+  ctx.clip();
+
+  // subtle animated waves using semi-transparent strokes
+  const now = performance.now();
+  for(let i=0;i<6;i++){ const off = Math.sin(now*0.0009 + i*0.7)*(6 + i*1.2); ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1; ctx.beginPath(); const y = lakeRect.y + 40 + i*50 + off; ctx.moveTo(lakeRect.x+12,y); ctx.quadraticCurveTo(lakeRect.x + lakeRect.w/2, y + Math.sin(now*0.0006 + i)*8, lakeRect.x + lakeRect.w -12, y); ctx.stroke(); }
+
+  ctx.restore();
+
+  // draw trash
+  trashList.forEach(t=>t.draw(ctx));
+
+  // draw can (image) at bottom grass area
+  if(images.can) ctx.drawImage(images.can, can.x, can.y, can.w, can.h);
+  else { ctx.fillStyle='#5a5a5a'; ctx.fillRect(can.x, can.y, can.w, can.h); }
+
+  // draw boat as overlay image near center of lake area
+  if(images.trash){/* reuse to draw a small boat-like rectangle as placeholder */ ctx.save(); ctx.translate(lakeRect.x + lakeRect.w/2, lakeRect.y + lakeRect.h/2 + Math.sin(performance.now()*0.001)*6); ctx.rotate(Math.sin(performance.now()*0.0008)*0.04); ctx.fillStyle='#0b5f86'; ctx.fillRect(-44,-12,88,24); ctx.restore(); }
+
+  // particles
+  particles.forEach(p=>{ ctx.globalAlpha = Math.max(0, p.life/1.2); ctx.fillStyle = p.color; ctx.beginPath(); ctx.ellipse(p.x, p.y, p.size, p.size, 0, 0, Math.PI*2); ctx.fill(); ctx.globalAlpha =1; });
+
+  // clarity bar
+  const cleaned = (totalTrash - trashList.length)/totalTrash;
+  const bx = 18, by = 18, bw = 240, bh = 16;
+  ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fillRect(bx-6,by-8,bw+12,bh+20);
+  ctx.fillStyle = '#ddd'; ctx.fillRect(bx,by,bw,bh);
+  const iw = Math.round(bw * cleaned);
+  ctx.fillStyle = `rgb(${Math.round(220 + (60-220)*cleaned)},${Math.round(60 + (180-60)*cleaned)},${Math.round(60 + (90-60)*cleaned)})`;
+  ctx.fillRect(bx,by,iw,bh);
+  ctx.fillStyle='#000'; ctx.font='12px Arial'; ctx.fillText(`Claridad: ${Math.round(cleaned*100)}%`, bx + 8, by + bh + 14);
+
+  // victory
+  if(trashList.length===0){ ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.fillRect(W/2-260,H/2-46,520,92); ctx.fillStyle='#067031'; ctx.font='26px Arial'; ctx.fillText('¡Felicidades! El lago está limpio 🎉', W/2-230, H/2-4); ctx.font='14px Arial'; ctx.fillStyle='#000'; ctx.fillText('Recarga la página para jugar otra vez', W/2-145, H/2+22); }
+}
+
+// helpers for round rect
+function roundRect(ctx, x, y, w, h, r){
+  ctx.beginPath(); ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); ctx.fill();
+}
+function roundRectFill(ctx,x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath(); ctx.fill();
+}
+
+// init
+spawnTrash(totalTrash);
+last = performance.now();
+ensureAudio(); // will request resume on first gesture but we call startAmbient only after resume
+requestAnimationFrame(update);
+
+// small UX: resume audio on first click/touch
+window.addEventListener('pointerdown', ()=>{ if(!audioStarted) ensureAudio(); }, {once:true});
+
+</script>
+</body>
+</html>
